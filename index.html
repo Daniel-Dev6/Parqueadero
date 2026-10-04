@@ -3,8 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#102a43">
+  <meta name="theme-color" content="#22c55e">
   <meta name="description" content="Gestión de vehículos, mensualidades y ventas del parqueadero.">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
   <title>Parqueadero |Jaime</title>
   <link rel="stylesheet" href="style.css">
   <script src="script.js" defer></script>
@@ -15,7 +18,10 @@
       <span class="brand-icon" aria-hidden="true">P</span>
       <span><strong>Parqueadero</strong><small>Jaime</small></span>
     </a>
-    <div class="topbar-date" id="current-date"></div>
+    <div class="topbar-actions">
+      <button class="button button-install" id="install-app" type="button" hidden>Instalar App</button>
+      <div class="topbar-date" id="current-date"></div>
+    </div>
   </header>
 
   <main class="container">
@@ -54,6 +60,7 @@
     <nav class="tabs" aria-label="Secciones">
       <button class="tab active" type="button" data-view="parking-view">Parqueadero</button>
       <button class="tab" type="button" data-view="memberships-view">Mensualidades</button>
+      <button class="tab" type="button" data-view="sales-view">Ventas y salidas</button>
       <button class="tab" type="button" data-view="reports-view">Reportes</button>
     </nav>
 
@@ -191,6 +198,55 @@
       </div>
     </section>
 
+    <section class="view" id="sales-view" hidden>
+      <div class="content-grid">
+        <article class="panel">
+          <div class="panel-heading">
+            <div><p class="eyebrow">INGRESO ADICIONAL</p><h2>Registrar venta</h2></div>
+            <span class="heading-icon" aria-hidden="true">＋</span>
+          </div>
+          <form id="sale-form" class="form-grid">
+            <label class="field field-wide">Concepto
+              <input name="description" type="text" maxlength="120" placeholder="Ej. Lavado, producto..." required>
+            </label>
+            <label class="field field-wide">Valor (COP)
+              <input name="amount" type="number" min="0" step="1" placeholder="Ej. 15000" required>
+            </label>
+            <button class="button button-primary field-wide" type="submit">Guardar venta</button>
+          </form>
+        </article>
+        <article class="panel">
+          <div class="panel-heading">
+            <div><p class="eyebrow">DINERO QUE SALE</p><h2>Registrar salida / gasto</h2></div>
+            <span class="heading-icon" aria-hidden="true">−</span>
+          </div>
+          <form id="expense-form" class="form-grid">
+            <label class="field field-wide">Concepto
+              <input name="description" type="text" maxlength="120" placeholder="Ej. Compra de insumos..." required>
+            </label>
+            <label class="field field-wide">Valor (COP)
+              <input name="amount" type="number" min="0" step="1" placeholder="Ej. 50000" required>
+            </label>
+            <button class="button button-primary field-wide" type="submit">Guardar salida</button>
+          </form>
+        </article>
+      </div>
+      <article class="panel section-panel">
+        <div class="panel-heading"><div><p class="eyebrow">BALANCE DE HOY</p><h2>Entradas y salidas</h2></div></div>
+        <div class="report-summary">
+          <div><span>Ventas</span><strong id="balance-sales">$0</strong></div>
+          <div><span>Salidas</span><strong id="balance-expenses">$0</strong></div>
+          <div><span>Balance neto</span><strong id="balance-net">$0</strong></div>
+        </div>
+        <div class="table-wrap">
+          <table><thead><tr><th>Fecha</th><th>Movimiento</th><th>Concepto</th><th>Valor</th><th></th></tr></thead>
+            <tbody id="cashflow-table"></tbody>
+          </table>
+        </div>
+        <p class="empty-state" id="cashflow-empty">Todavía no hay movimientos registrados.</p>
+      </article>
+    </section>
+
     <section class="view" id="reports-view" hidden>
       <article class="panel">
         <div class="panel-heading">
@@ -217,12 +273,18 @@
         </form>
         <div class="report-summary" aria-live="polite">
           <div><span>Ventas encontradas</span><strong id="report-total">$0</strong></div>
+          <div><span>Salidas encontradas</span><strong id="report-expense-total">$0</strong></div>
+          <div><span>Balance neto</span><strong id="report-net">$0</strong></div>
           <div><span>Número de cobros</span><strong id="report-count">0</strong></div>
           <div><span>Mensualidades incluidas</span><strong id="report-membership-total">$0</strong></div>
         </div>
+        <section class="monthly-chart" aria-labelledby="monthly-chart-title">
+          <h3 id="monthly-chart-title">Comparativo mensual de ventas y salidas</h3>
+          <div id="monthly-chart" class="chart-bars" role="img" aria-label="Gráfica mensual de ventas, salidas y balance"></div>
+        </section>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Fecha</th><th>Placa / concepto</th><th>Tipo</th><th>Detalle</th><th>Valor</th></tr></thead>
+            <thead><tr><th>Fecha</th><th>Placa / concepto</th><th>Tipo</th><th>Detalle</th><th>Valor</th><th></th></tr></thead>
             <tbody id="report-table"></tbody>
           </table>
         </div>
@@ -258,5 +320,46 @@
       </div>
     </div>
   </dialog>
+  <dialog id="checkout-dialog" class="receipt-dialog">
+    <form id="checkout-form" class="receipt">
+      <div class="panel-heading"><div><p class="eyebrow">REGISTRAR SALIDA</p><h2 id="checkout-title">Cobro del vehículo</h2></div></div>
+      <p class="form-hint" id="checkout-calculation"></p>
+      <label class="field">Valor final cobrado (COP)
+        <input id="checkout-amount" name="amount" type="number" min="0" step="1" required>
+      </label>
+      <div class="receipt-actions">
+        <button class="button button-secondary" id="cancel-checkout" type="button">Cancelar</button>
+        <button class="button button-primary" type="submit">Confirmar cobro y salida</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="edit-dialog" class="receipt-dialog">
+    <form id="edit-form" class="receipt form-grid">
+      <div class="panel-heading field-wide"><div><p class="eyebrow">CORREGIR REGISTRO</p><h2>Editar movimiento</h2></div></div>
+      <label class="field field-wide">Placa o concepto
+        <input name="label" type="text" maxlength="120" required>
+      </label>
+      <label class="field field-wide">Valor (COP)
+        <input name="amount" type="number" min="0" step="1" required>
+      </label>
+      <div class="receipt-actions field-wide">
+        <button class="button button-secondary" id="cancel-edit" type="button">Cancelar</button>
+        <button class="button button-primary" type="submit">Guardar cambios</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="install-help-dialog" class="receipt-dialog">
+    <div class="receipt">
+      <h2>Instalar Parqueadero</h2>
+      <p>En iPhone: abre esta página en Safari, toca Compartir y elige “Agregar a pantalla de inicio”. En Android o PC, usa “Instalar” en el menú del navegador si está disponible.</p>
+      <div class="receipt-actions"><button class="button button-primary" id="close-install-help" type="button">Entendido</button></div>
+    </div>
+  </dialog>
+  <script>
+    if ("serviceWorker" in navigator && location.protocol !== "file:") {
+      window.addEventListener("load", () => navigator.serviceWorker.register("./sw.js")
+        .catch((error) => console.error("No se pudo registrar el service worker:", error)));
+    }
+  </script>
 </body>
 </html>

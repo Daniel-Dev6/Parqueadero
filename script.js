@@ -1,7 +1,7 @@
 "use strict";
 
 const STORAGE_KEY = "parqueadero-data-v1";
-const state = { active: [], transactions: [], memberships: [] };
+const state = { active: [], transactions: [], memberships: [], expenses: [] };
 const byId = (id) => document.getElementById(id);
 const currency = new Intl.NumberFormat("es-CO", {
   style: "currency",
@@ -15,6 +15,8 @@ const dateTimeFormat = new Intl.DateTimeFormat("es-CO", {
 const dateFormat = new Intl.DateTimeFormat("es-CO", { dateStyle: "medium" });
 let toastTimeout;
 let currentReceipt = null;
+let pendingCheckoutId = null;
+let editingRecord = null;
 let reportFilters = { plate: "", from: "", to: "" };
 
 function showToast(message, isError = false) {
@@ -66,7 +68,8 @@ function normalizePlate(value) {
 
 function isValidStore(data) {
   return data && Array.isArray(data.active) &&
-    Array.isArray(data.transactions) && Array.isArray(data.memberships);
+    Array.isArray(data.transactions) && Array.isArray(data.memberships) &&
+    (data.expenses === undefined || Array.isArray(data.expenses));
 }
 
 function loadData() {
@@ -81,6 +84,7 @@ function loadData() {
     state.active = parsed.active;
     state.transactions = parsed.transactions;
     state.memberships = parsed.memberships;
+    state.expenses = parsed.expenses || [];
   } catch (error) {
     console.error("No se pudieron cargar los datos guardados:", error);
     showToast("No se pudieron cargar los datos del navegador. Revisa el almacenamiento local.", true);
@@ -106,6 +110,7 @@ function restoreState(snapshot) {
   state.active = snapshot.active;
   state.transactions = snapshot.transactions;
   state.memberships = snapshot.memberships;
+  state.expenses = snapshot.expenses;
 }
 
 function transactionDate(transaction) {
@@ -157,7 +162,10 @@ function renderActive() {
       <td class="vehicle-cell"><strong class="plate">${escapeHtml(vehicle.plate)}</strong><span>${escapeHtml(vehicle.vehicleType)}</span></td>
       <td>${escapeHtml(formatDateTime(vehicle.entryAt))}</td>
       <td>${escapeHtml(formatMoney(vehicle.hourlyRate))}</td>
-      <td><button class="button button-exit" type="button" data-checkout="${escapeHtml(vehicle.id)}">Dar salida</button></td>
+      <td class="action-cell">
+        <button class="button button-secondary button-small" type="button" data-edit-active="${escapeHtml(vehicle.id)}">Editar</button>
+        <button class="button button-exit" type="button" data-checkout="${escapeHtml(vehicle.id)}">Dar salida</button>
+      </td>
     </tr>
   `).join("");
   byId("active-empty").hidden = vehicles.length > 0;
@@ -167,6 +175,7 @@ function transactionDescription(transaction) {
   if (transaction.category === "parking") {
     return `${transaction.chargedHours} h × ${formatMoney(transaction.hourlyRate)}/h`;
   }
+  if (transaction.category === "sale") return transaction.description || "Venta adicional";
   return transaction.description || "Pago de mensualidad";
 }
 
@@ -177,10 +186,13 @@ function renderRecent() {
   byId("recent-table").innerHTML = transactions.map((transaction) => `
     <tr>
       <td>${escapeHtml(formatDateTime(transaction.paidAt))}</td>
-      <td><strong class="plate">${escapeHtml(transaction.plate)}</strong></td>
+      <td><strong class="plate">${escapeHtml(transaction.plate || transaction.description || "—")}</strong></td>
       <td>${escapeHtml(transactionDescription(transaction))}</td>
       <td class="amount">${escapeHtml(formatMoney(transaction.amount))}</td>
-      <td><button class="button button-exit" type="button" data-receipt="${escapeHtml(transaction.id)}">Recibo</button></td>
+      <td class="action-cell">
+        <button class="button button-secondary button-small" type="button" data-edit-transaction="${escapeHtml(transaction.id)}">Editar</button>
+        <button class="button button-exit" type="button" data-receipt="${escapeHtml(transaction.id)}">Recibo</button>
+      </td>
     </tr>
   `).join("");
   byId("recent-empty").hidden = transactions.length > 0;
@@ -216,7 +228,7 @@ function getFilteredTransactions() {
     .filter((transaction) => {
       const paidAt = transactionDate(transaction);
       if (!paidAt) return false;
-      if (plate && !normalizePlate(transaction.plate).includes(plate)) return false;
+      if (plate && !normalizePlate(`${transaction.plate || ""} ${transaction.description || ""}`).includes(plate)) return false;
       if (from && paidAt < from) return false;
       if (to && paidAt > to) return false;
       return true;
@@ -226,22 +238,122 @@ function getFilteredTransactions() {
 
 function renderReport() {
   const transactions = getFilteredTransactions();
+  const expenses = getFilteredExpenses();
   const total = transactions.reduce((sum, transaction) => sum + (Number(transaction.amount) || 0), 0);
+  const expenseTotal = expenses.reduce((sum, expense) => sum + (Number(expense.amount) || 0), 0);
   const membershipTotal = transactions.reduce((sum, transaction) =>
     sum + (transaction.category === "membership" ? Number(transaction.amount) || 0 : 0), 0);
   byId("report-total").textContent = formatMoney(total);
+  byId("report-expense-total").textContent = formatMoney(expenseTotal);
+  byId("report-net").textContent = formatMoney(total - expenseTotal);
   byId("report-count").textContent = transactions.length;
   byId("report-membership-total").textContent = formatMoney(membershipTotal);
-  byId("report-table").innerHTML = transactions.map((transaction) => `
+  const rows = [
+    ...transactions.map((transaction) => ({
+      id: transaction.id,
+      date: transaction.paidAt,
+      label: transaction.plate || transaction.description || "—",
+      category: transaction.category,
+      description: transactionDescription(transaction),
+      amount: Number(transaction.amount) || 0,
+      type: "transaction",
+    })),
+    ...expenses.map((expense) => ({
+      id: expense.id,
+      date: expense.paidAt,
+      label: expense.description,
+      category: "expense",
+      description: expense.description,
+      amount: Number(expense.amount) || 0,
+      type: "expense",
+    })),
+  ].sort((a, b) => (validDate(b.date)?.getTime() || 0) - (validDate(a.date)?.getTime() || 0));
+  byId("report-table").innerHTML = rows.map((row) => `
     <tr>
-      <td>${escapeHtml(formatDateTime(transaction.paidAt))}</td>
-      <td><strong class="plate">${escapeHtml(transaction.plate)}</strong></td>
-      <td>${transaction.category === "membership" ? "Mensualidad" : "Parqueadero"}</td>
-      <td>${escapeHtml(transactionDescription(transaction))}</td>
-      <td class="amount">${escapeHtml(formatMoney(transaction.amount))}</td>
+      <td>${escapeHtml(formatDateTime(row.date))}</td>
+      <td><strong class="plate">${escapeHtml(row.label)}</strong></td>
+      <td>${row.category === "membership" ? "Mensualidad" : row.category === "parking" ? "Parqueadero" : row.category === "expense" ? "Salida" : "Venta"}</td>
+      <td>${escapeHtml(row.description)}</td>
+      <td class="amount">${escapeHtml(formatMoney(row.amount))}</td>
+      <td><button class="button button-secondary button-small" type="button" data-edit-${row.type}="${escapeHtml(row.id)}">Editar</button></td>
     </tr>
   `).join("");
-  byId("report-empty").hidden = transactions.length > 0;
+  byId("report-empty").hidden = rows.length > 0;
+  renderMonthlyChart(transactions, expenses);
+}
+
+function getFilteredExpenses() {
+  const query = normalizePlate(reportFilters.plate);
+  const from = reportFilters.from ? new Date(`${reportFilters.from}T00:00:00`) : null;
+  const to = reportFilters.to ? new Date(`${reportFilters.to}T23:59:59.999`) : null;
+  return state.expenses.filter((expense) => {
+    const paidAt = validDate(expense.paidAt);
+    if (!paidAt) return false;
+    if (query && !normalizePlate(expense.description).includes(query)) return false;
+    if (from && paidAt < from) return false;
+    if (to && paidAt > to) return false;
+    return true;
+  });
+}
+
+function renderMonthlyChart(transactions, expenses) {
+  const months = [];
+  const now = new Date();
+  for (let offset = 11; offset >= 0; offset -= 1) {
+    const date = new Date(now.getFullYear(), now.getMonth() - offset, 1);
+    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+    months.push({
+      key,
+      label: new Intl.DateTimeFormat("es-CO", { month: "short", year: "2-digit" }).format(date),
+      sales: transactions.reduce((sum, item) =>
+        sum + (transactionMonthKey(item) === key ? Number(item.amount) || 0 : 0), 0),
+      expenses: expenses.reduce((sum, item) =>
+        sum + (transactionMonthKey(item) === key ? Number(item.amount) || 0 : 0), 0),
+    });
+  }
+  const maximum = Math.max(1, ...months.flatMap((month) => [month.sales, month.expenses]));
+  byId("monthly-chart").innerHTML = months.map((month) => `
+    <div class="chart-month">
+      <div class="chart-columns">
+        <span class="chart-bar sales-bar" style="height:${Math.max(2, month.sales / maximum * 100)}%" title="Ventas: ${escapeHtml(formatMoney(month.sales))}"></span>
+        <span class="chart-bar expense-bar" style="height:${Math.max(2, month.expenses / maximum * 100)}%" title="Salidas: ${escapeHtml(formatMoney(month.expenses))}"></span>
+      </div>
+      <strong>${escapeHtml(month.label)}</strong>
+      <small>Ventas ${escapeHtml(formatMoney(month.sales))}</small>
+      <small>Salidas ${escapeHtml(formatMoney(month.expenses))}</small>
+      <small>Neto ${escapeHtml(formatMoney(month.sales - month.expenses))}</small>
+    </div>
+  `).join("");
+}
+
+function transactionMonthKey(item) {
+  const date = validDate(item.paidAt);
+  return date ? `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}` : "";
+}
+
+function renderCashflow() {
+  const now = new Date();
+  const todayTransactions = state.transactions.filter((item) => sameLocalDay(transactionDate(item), now));
+  const todayExpenses = state.expenses.filter((item) => sameLocalDay(validDate(item.paidAt), now));
+  const sales = todayTransactions.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+  const expenses = todayExpenses.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+  byId("balance-sales").textContent = formatMoney(sales);
+  byId("balance-expenses").textContent = formatMoney(expenses);
+  byId("balance-net").textContent = formatMoney(sales - expenses);
+  const movements = [
+    ...state.transactions.map((item) => ({ ...item, kind: "Venta", description: item.plate || transactionDescription(item), type: "transaction" })),
+    ...state.expenses.map((item) => ({ ...item, kind: "Salida", type: "expense" })),
+  ].sort((a, b) => (validDate(b.paidAt)?.getTime() || 0) - (validDate(a.paidAt)?.getTime() || 0)).slice(0, 12);
+  byId("cashflow-table").innerHTML = movements.map((item) => `
+    <tr>
+      <td>${escapeHtml(formatDateTime(item.paidAt))}</td>
+      <td>${item.kind}</td>
+      <td>${escapeHtml(item.description || "—")}</td>
+      <td class="amount">${escapeHtml(formatMoney(item.amount))}</td>
+      <td><button class="button button-secondary button-small" type="button" data-edit-${item.type}="${escapeHtml(item.id)}">Editar</button></td>
+    </tr>
+  `).join("");
+  byId("cashflow-empty").hidden = movements.length > 0;
 }
 
 function renderAll() {
@@ -250,6 +362,7 @@ function renderAll() {
   renderRecent();
   renderMemberships();
   renderReport();
+  renderCashflow();
 }
 
 function addOneMonth(dateValue) {
@@ -273,12 +386,14 @@ function openReceipt(transaction) {
         ["Tiempo cobrado", `${transaction.chargedHours} hora(s) · ${transaction.durationMinutes} minuto(s)`],
         ["Tarifa por hora", formatMoney(transaction.hourlyRate)],
       ]
-    : [
+    : transaction.category === "membership"
+      ? [
         ["Placa", transaction.plate],
         ["Cliente", transaction.customerName || "—"],
         ["Concepto", transactionDescription(transaction)],
         ["Vigencia hasta", formatDate(transaction.endsAt)],
-      ];
+      ]
+      : [["Concepto", transactionDescription(transaction)]];
   byId("receipt-details").innerHTML = `
     <div class="receipt-lines">
       <div class="receipt-line"><span>Recibo</span><strong>${escapeHtml(transaction.receiptNumber || transaction.id.slice(0, 8).toUpperCase())}</strong></div>
@@ -311,6 +426,33 @@ function closeVehicle(vehicleId) {
     showToast("No se pudo calcular el valor del cobro. Verifica la tarifa del registro.", true);
     return;
   }
+  pendingCheckoutId = vehicleId;
+  byId("checkout-title").textContent = `${vehicle.plate} · ${chargedHours} hora(s)`;
+  byId("checkout-calculation").textContent =
+    `Cálculo sugerido: ${chargedHours} hora(s) × ${formatMoney(vehicle.hourlyRate)}/h = ${formatMoney(amount)}. Puedes cambiar el valor final, incluso dejarlo en cero.`;
+  byId("checkout-amount").value = String(amount);
+  byId("checkout-dialog").showModal();
+}
+
+function completeCheckout(amount) {
+  const index = state.active.findIndex((vehicle) => vehicle.id === pendingCheckoutId);
+  if (index < 0) {
+    showToast("No se encontró el vehículo activo para cerrar.", true);
+    return;
+  }
+  const vehicle = state.active[index];
+  const entryAt = validDate(vehicle.entryAt);
+  if (!entryAt) {
+    showToast("La fecha de ingreso no es válida. Corrige el registro antes de cobrar.", true);
+    return;
+  }
+  const exitAt = new Date();
+  const durationMinutes = Math.max(0, Math.ceil((exitAt.getTime() - entryAt.getTime()) / 60000));
+  const chargedHours = Math.max(1, Math.ceil(durationMinutes / 60));
+  if (!Number.isFinite(amount) || amount < 0) {
+    showToast("El valor cobrado debe ser un número igual o mayor a cero.", true);
+    return;
+  }
   const transaction = {
     id: crypto.randomUUID(),
     receiptNumber: `PAR-${Date.now().toString().slice(-8)}`,
@@ -333,8 +475,112 @@ function closeVehicle(vehicleId) {
     renderAll();
     return;
   }
+  pendingCheckoutId = null;
+  byId("checkout-dialog").close();
   renderAll();
   openReceipt(transaction);
+}
+
+function recordCashMovement(form, kind) {
+  const values = new FormData(form);
+  const description = String(values.get("description") || "").trim();
+  const amount = Number(values.get("amount"));
+  if (!description || !Number.isFinite(amount) || amount < 0) {
+    showToast("Escribe un concepto y un valor válido igual o mayor a cero.", true);
+    return;
+  }
+  const previousState = snapshotState();
+  if (kind === "expense") {
+    state.expenses.push({ id: crypto.randomUUID(), description, amount, paidAt: new Date().toISOString() });
+  } else {
+    state.transactions.push({
+      id: crypto.randomUUID(),
+      receiptNumber: `VEN-${Date.now().toString().slice(-8)}`,
+      category: "sale",
+      plate: "",
+      description,
+      paidAt: new Date().toISOString(),
+      amount,
+    });
+  }
+  if (!saveData()) {
+    restoreState(previousState);
+    renderAll();
+    return;
+  }
+  form.reset();
+  renderAll();
+  showToast(kind === "expense" ? "Salida registrada." : "Venta adicional registrada.");
+}
+
+function editRecord(type, id) {
+  const collections = {
+    active: state.active,
+    transaction: state.transactions,
+    expense: state.expenses,
+  };
+  const record = collections[type]?.find((item) => item.id === id);
+  if (!record) {
+    showToast("No se encontró el registro para editar.", true);
+    return;
+  }
+  editingRecord = { type, id };
+  const labelInput = byId("edit-form").elements.label;
+  const amountInput = byId("edit-form").elements.amount;
+  labelInput.value = type === "active"
+    ? record.plate
+    : type === "expense"
+      ? record.description
+      : record.category === "sale"
+        ? record.description
+        : record.plate;
+  amountInput.value = String(type === "active" ? record.hourlyRate : record.amount);
+  byId("edit-dialog").showModal();
+}
+
+function saveEditedRecord(form) {
+  if (!editingRecord) return;
+  const { type, id } = editingRecord;
+  const label = String(new FormData(form).get("label") || "").trim();
+  const amount = Number(new FormData(form).get("amount"));
+  if (!label || !Number.isFinite(amount) || amount < 0) {
+    showToast("Completa el texto y un valor válido igual o mayor a cero.", true);
+    return;
+  }
+  const collections = { active: state.active, transaction: state.transactions, expense: state.expenses };
+  const record = collections[type].find((item) => item.id === id);
+  if (!record) {
+    showToast("El registro ya no está disponible.", true);
+    return;
+  }
+  if (type === "active") {
+    const plate = normalizePlate(label);
+    if (state.active.some((item) => item.id !== id && normalizePlate(item.plate) === plate)) {
+      showToast("Ya existe otro ingreso activo con esa placa.", true);
+      return;
+    }
+  }
+  const previousState = snapshotState();
+  if (type === "active") {
+    record.plate = normalizePlate(label);
+    record.hourlyRate = amount;
+  } else if (type === "expense") {
+    record.description = label;
+    record.amount = amount;
+  } else {
+    if (record.category === "sale") record.description = label;
+    else record.plate = normalizePlate(label);
+    record.amount = amount;
+  }
+  if (!saveData()) {
+    restoreState(previousState);
+    renderAll();
+    return;
+  }
+  editingRecord = null;
+  byId("edit-dialog").close();
+  renderAll();
+  showToast("Registro actualizado.");
 }
 
 function createMembership(form) {
@@ -523,14 +769,33 @@ byId("entry-form").addEventListener("submit", (event) => {
 
 byId("active-table").addEventListener("click", (event) => {
   const button = event.target.closest("[data-checkout]");
-  if (button) closeVehicle(button.dataset.checkout);
+  if (button) {
+    closeVehicle(button.dataset.checkout);
+    return;
+  }
+  const editButton = event.target.closest("[data-edit-active]");
+  if (editButton) editRecord("active", editButton.dataset.editActive);
 });
 
 byId("recent-table").addEventListener("click", (event) => {
+  const editButton = event.target.closest("[data-edit-transaction]");
+  if (editButton) {
+    editRecord("transaction", editButton.dataset.editTransaction);
+    return;
+  }
   const button = event.target.closest("[data-receipt]");
   if (!button) return;
   const transaction = state.transactions.find((item) => item.id === button.dataset.receipt);
   if (transaction) openReceipt(transaction);
+});
+
+["report-table", "cashflow-table"].forEach((tableId) => {
+  byId(tableId).addEventListener("click", (event) => {
+    const button = event.target.closest("[data-edit-transaction], [data-edit-expense]");
+    if (!button) return;
+    if (button.dataset.editTransaction) editRecord("transaction", button.dataset.editTransaction);
+    else editRecord("expense", button.dataset.editExpense);
+  });
 });
 
 byId("active-search").addEventListener("input", renderActive);
@@ -543,6 +808,53 @@ byId("membership-table").addEventListener("click", (event) => {
   const button = event.target.closest("[data-renew]");
   if (button) renewMembership(button.dataset.renew);
 });
+byId("sale-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  recordCashMovement(event.currentTarget, "sale");
+});
+byId("expense-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  recordCashMovement(event.currentTarget, "expense");
+});
+byId("checkout-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  completeCheckout(Number(byId("checkout-amount").value));
+});
+byId("cancel-checkout").addEventListener("click", () => {
+  pendingCheckoutId = null;
+  byId("checkout-dialog").close();
+});
+byId("edit-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  saveEditedRecord(event.currentTarget);
+});
+byId("cancel-edit").addEventListener("click", () => {
+  editingRecord = null;
+  byId("edit-dialog").close();
+});
+byId("install-app").addEventListener("click", async () => {
+  if (window.installPrompt) {
+    await window.installPrompt.prompt();
+    window.installPrompt = null;
+    byId("install-app").hidden = true;
+    return;
+  }
+  byId("install-help-dialog").showModal();
+});
+byId("close-install-help").addEventListener("click", () => byId("install-help-dialog").close());
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  window.installPrompt = event;
+  byId("install-app").hidden = false;
+});
+window.addEventListener("appinstalled", () => {
+  window.installPrompt = null;
+  byId("install-app").hidden = true;
+  showToast("Parqueadero quedó instalada en este dispositivo.");
+});
+const isAppleMobile = /iphone|ipad|ipod/i.test(navigator.userAgent);
+const isStandalone = window.matchMedia("(display-mode: standalone)").matches || navigator.standalone;
+if (isAppleMobile && !isStandalone) byId("install-app").hidden = false;
 
 byId("report-form").addEventListener("submit", (event) => {
   event.preventDefault();
