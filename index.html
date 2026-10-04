@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#102a43">
+  <meta name="description" content="Gestión de vehículos, mensualidades y ventas del parqueadero.">
+  <title>Parqueadero | Control y ventas</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="script.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#" aria-label="Parqueadero, inicio">
+      <span class="brand-icon" aria-hidden="true">P</span>
+      <span><strong>Parqueadero</strong><small>Control de operación</small></span>
+    </a>
+    <div class="topbar-date" id="current-date"></div>
+  </header>
+
+  <main class="container">
+    <section class="welcome">
+      <div>
+        <p class="eyebrow">PANEL DE CONTROL</p>
+        <h1>Tu parqueadero, al día.</h1>
+        <p class="muted">Registra ingresos, administra mensualidades y consulta tus ventas.</p>
+      </div>
+      <div class="welcome-mark" aria-hidden="true">⌁</div>
+    </section>
+
+    <section class="stats-grid" aria-label="Resumen del parqueadero">
+      <article class="stat-card">
+        <span class="stat-label">Vehículos adentro</span>
+        <strong id="stat-active">0</strong>
+        <span class="stat-note">Ocupación actual</span>
+      </article>
+      <article class="stat-card">
+        <span class="stat-label">Ventas de hoy</span>
+        <strong id="stat-today">$0</strong>
+        <span class="stat-note">Parqueadero y mensualidades</span>
+      </article>
+      <article class="stat-card">
+        <span class="stat-label">Ventas del mes</span>
+        <strong id="stat-month">$0</strong>
+        <span class="stat-note">Acumulado del mes actual</span>
+      </article>
+      <article class="stat-card">
+        <span class="stat-label">Mensualidades vigentes</span>
+        <strong id="stat-memberships">0</strong>
+        <span class="stat-note">Clientes con pase activo</span>
+      </article>
+    </section>
+
+    <nav class="tabs" aria-label="Secciones">
+      <button class="tab active" type="button" data-view="parking-view">Parqueadero</button>
+      <button class="tab" type="button" data-view="memberships-view">Mensualidades</button>
+      <button class="tab" type="button" data-view="reports-view">Reportes</button>
+    </nav>
+
+    <section class="view active" id="parking-view">
+      <div class="content-grid">
+        <article class="panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">NUEVO REGISTRO</p>
+              <h2>Registrar ingreso</h2>
+            </div>
+            <span class="heading-icon" aria-hidden="true">＋</span>
+          </div>
+          <form id="entry-form" class="form-grid">
+            <label class="field field-wide">
+              Placa
+              <input id="entry-plate" name="plate" type="text" maxlength="10" placeholder="Ej. ABC123" autocomplete="off" required>
+            </label>
+            <label class="field">
+              Tipo de vehículo
+              <select id="entry-type" name="vehicleType" required>
+                <option value="Carro">Carro</option>
+                <option value="Moto">Moto</option>
+              </select>
+            </label>
+            <label class="field">
+              Valor por hora (COP)
+              <input id="entry-rate" name="hourlyRate" type="number" min="0" step="100" placeholder="Ej. 3000" required>
+            </label>
+            <label class="field field-wide">
+              Fecha y hora de ingreso
+              <input id="entry-time" name="entryAt" type="datetime-local" required>
+            </label>
+            <button class="button button-primary field-wide" type="submit">Registrar vehículo</button>
+          </form>
+          <p class="form-hint">La tarifa se puede ajustar para cada cliente. Se cobra cada hora iniciada, con mínimo de una hora.</p>
+        </article>
+
+        <article class="panel">
+          <div class="panel-heading panel-heading-row">
+            <div>
+              <p class="eyebrow">EN ESTE MOMENTO</p>
+              <h2>Vehículos activos</h2>
+            </div>
+            <span class="count-pill" id="active-count">0</span>
+          </div>
+          <label class="search-field">
+            <span aria-hidden="true">⌕</span>
+            <input id="active-search" type="search" placeholder="Buscar por placa..." aria-label="Buscar vehículos por placa">
+          </label>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Vehículo</th><th>Ingreso</th><th>Tarifa/h</th><th></th></tr></thead>
+              <tbody id="active-table"></tbody>
+            </table>
+          </div>
+          <p class="empty-state" id="active-empty">No hay vehículos registrados en este momento.</p>
+        </article>
+      </div>
+
+      <article class="panel section-panel">
+        <div class="panel-heading panel-heading-row">
+          <div>
+            <p class="eyebrow">MOVIMIENTOS RECIENTES</p>
+            <h2>Últimos cobros</h2>
+          </div>
+          <button class="button button-secondary button-small" type="button" data-open-reports>Ver reportes</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Fecha</th><th>Placa / concepto</th><th>Detalle</th><th>Valor</th><th></th></tr></thead>
+            <tbody id="recent-table"></tbody>
+          </table>
+        </div>
+        <p class="empty-state" id="recent-empty">Todavía no hay cobros registrados.</p>
+      </article>
+    </section>
+
+    <section class="view" id="memberships-view" hidden>
+      <div class="content-grid">
+        <article class="panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">CLIENTES FRECUENTES</p>
+              <h2>Crear mensualidad</h2>
+            </div>
+            <span class="heading-icon" aria-hidden="true">↻</span>
+          </div>
+          <form id="membership-form" class="form-grid">
+            <label class="field">
+              Placa
+              <input name="plate" type="text" maxlength="10" placeholder="Ej. ABC123" autocomplete="off" required>
+            </label>
+            <label class="field">
+              Nombre del cliente
+              <input name="customerName" type="text" maxlength="80" placeholder="Nombre completo" required>
+            </label>
+            <label class="field">
+              Celular (opcional)
+              <input name="phone" type="tel" maxlength="20" placeholder="Ej. 3001234567">
+            </label>
+            <label class="field">
+              Valor mensual (COP)
+              <input name="monthlyRate" type="number" min="0" step="100" placeholder="Ej. 180000" required>
+            </label>
+            <label class="field">
+              Inicio
+              <input name="startsAt" type="date" required>
+            </label>
+            <button class="button button-primary field-wide" type="submit">Crear mensualidad y registrar pago</button>
+          </form>
+          <p class="form-hint">Al crearla se registra el primer pago. La vigencia inicial es de un mes desde la fecha de inicio.</p>
+        </article>
+
+        <article class="panel">
+          <div class="panel-heading panel-heading-row">
+            <div>
+              <p class="eyebrow">CLIENTES REGISTRADOS</p>
+              <h2>Mensualidades</h2>
+            </div>
+            <span class="count-pill" id="membership-count">0</span>
+          </div>
+          <label class="search-field">
+            <span aria-hidden="true">⌕</span>
+            <input id="membership-search" type="search" placeholder="Buscar por placa o nombre..." aria-label="Buscar mensualidades">
+          </label>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Cliente / placa</th><th>Vigencia hasta</th><th>Mensualidad</th><th>Estado</th><th></th></tr></thead>
+              <tbody id="membership-table"></tbody>
+            </table>
+          </div>
+          <p class="empty-state" id="membership-empty">No hay mensualidades registradas.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="view" id="reports-view" hidden>
+      <article class="panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">CONSULTA DE MOVIMIENTOS</p>
+            <h2>Reportes de ventas</h2>
+          </div>
+        </div>
+        <form id="report-form" class="report-filters">
+          <label class="field">
+            Placa
+            <input name="plate" type="search" placeholder="Todas las placas">
+          </label>
+          <label class="field">
+            Desde
+            <input name="from" type="date">
+          </label>
+          <label class="field">
+            Hasta
+            <input name="to" type="date">
+          </label>
+          <button class="button button-primary" type="submit">Filtrar</button>
+          <button class="button button-secondary" id="clear-report" type="button">Limpiar</button>
+        </form>
+        <div class="report-summary" aria-live="polite">
+          <div><span>Ventas encontradas</span><strong id="report-total">$0</strong></div>
+          <div><span>Número de cobros</span><strong id="report-count">0</strong></div>
+          <div><span>Mensualidades incluidas</span><strong id="report-membership-total">$0</strong></div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Fecha</th><th>Placa / concepto</th><th>Tipo</th><th>Detalle</th><th>Valor</th></tr></thead>
+            <tbody id="report-table"></tbody>
+          </table>
+        </div>
+        <p class="empty-state" id="report-empty">No hay movimientos para los filtros seleccionados.</p>
+      </article>
+      <p class="report-note">El reporte incluye cobros de parqueadero y pagos o renovaciones de mensualidad, según el rango de fechas seleccionado.</p>
+    </section>
+  </main>
+
+  <footer class="footer">Parqueadero · Gestión local de vehículos y ventas<br>Elaborado por Daniel Fernando Avendaño Patiño</footer>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <dialog id="receipt-dialog" class="receipt-dialog">
+    <div class="receipt">
+      <div class="receipt-top">
+        <span class="brand-icon" aria-hidden="true">P</span>
+        <div><strong>PARQUEADERO</strong><small>Comprobante de pago</small></div>
+      </div>
+      <div id="receipt-details"></div>
+      <div class="receipt-total"><span>TOTAL PAGADO</span><strong id="receipt-total"></strong></div>
+      <p class="receipt-thanks">Gracias por confiar en nosotros.</p>
+      <div class="whatsapp-box no-print">
+        <label class="field">
+          ¿Desea enviar este recibo por WhatsApp?
+          <input id="receipt-phone" type="tel" placeholder="Número con indicativo, ej. 573001234567">
+        </label>
+        <button class="button button-whatsapp" id="send-whatsapp" type="button">Enviar por WhatsApp</button>
+        <p class="form-hint">Se abrirá WhatsApp con el resumen del cobro listo para enviar.</p>
+      </div>
+      <div class="receipt-actions no-print">
+        <button class="button button-secondary" id="close-receipt" type="button">Cerrar</button>
+        <button class="button button-primary" id="print-receipt" type="button">Imprimir recibo</button>
+      </div>
+    </div>
+  </dialog>
+</body>
+</html>
