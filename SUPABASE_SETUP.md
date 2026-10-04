@@ -1,23 +1,63 @@
-# Configuración de usuarios y base de datos
+# Login, sincronización y roles
 
-La PWA actual sigue guardando los registros operativos en el almacenamiento local del navegador. El esquema de `supabase/schema.sql` prepara las tablas y reglas de seguridad para una futura conexión; **por sí solo no conecta ni sincroniza esta versión de la aplicación**. No se deben crear cuentas de colaboradores ni guardar datos reales hasta completar la integración y validar las políticas.
+La aplicación usa Supabase Auth y Postgres. Los registros se comparten entre los dispositivos que ingresen con cuentas del mismo negocio. Se requiere internet para iniciar sesión y sincronizar; no se guardan cambios pendientes sin conexión.
 
-## Preparar Supabase
+## 1. Crear y configurar Supabase
 
-1. Crea un proyecto en Supabase y conserva la URL y la clave pública (`anon`/publishable). Nunca copies la `service_role`/secret key al frontend.
-2. En el SQL Editor ejecuta `supabase/schema.sql`.
-3. Crea la cuenta del dueño en Authentication. Copia su UUID y ejecuta, sustituyendo ambos valores:
+1. Crea un proyecto en Supabase.
+2. En **SQL Editor**, ejecuta completo `supabase/schema.sql`.
+3. En **Authentication → Providers → Email**, desactiva el registro público de usuarios. Los usuarios se crean desde la sección **Usuarios** de la aplicación, mediante invitación.
+4. En **Authentication → URL Configuration**, configura como `Site URL` el dominio final de Vercel y añade ese dominio a `Redirect URLs`. Añade también la URL local de desarrollo si la vas a usar.
+5. En **Database → Publications → supabase_realtime**, habilita estas tablas: `active_vehicles`, `memberships`, `active_vehicle_rates`, `membership_prices`, `transactions`, `expenses` y `profiles`. RLS sigue aplicándose a las suscripciones.
+6. En **Project Settings → API**, copia la URL del proyecto y la clave pública `anon`/publishable. Pon esos valores en `supabase-config.js`:
 
-   ```sql
-   update public.profiles
-   set business_id = 'UUID-DE-NEGOCIO', role = 'owner'
-   where id = 'UUID-DEL-USUARIO-DUENO';
+   ```js
+   window.PARQUEADERO_CONFIG = {
+     supabaseUrl: "https://TU-PROYECTO.supabase.co",
+     supabaseAnonKey: "TU-CLAVE-PUBLICA",
+   };
    ```
 
-   Puedes generar un UUID para el negocio en SQL con `select gen_random_uuid();`.
-4. Crea las cuentas de administrador y colaboradores desde Authentication. Asigna a cada perfil el mismo `business_id` del dueño y el rol `admin` o `collaborator`. Los usuarios recién creados quedan sin negocio y no pueden consultar los datos hasta asignarlos.
-5. Antes de usar datos reales, prueba con cuentas distintas que los colaboradores no puedan leer `transactions`, `expenses` ni `membership_prices`, y que un negocio no pueda consultar registros de otro.
+   La clave pública se puede incluir en la app web; **no** pongas la `service_role` ni ninguna clave secreta en `supabase-config.js`, el repositorio ni Vercel como variable expuesta al navegador.
 
-## Alcance pendiente antes de publicar el inicio de sesión
+Configura un proveedor SMTP/correo de Auth antes de invitar al equipo en producción; el servicio de correo de prueba de Supabase tiene restricciones de envío.
 
-La interfaz todavía no autentica usuarios ni consulta Supabase: conectar esas funciones requiere integrar login, sincronización y administración de usuarios en `script.js`, migrar los datos locales existentes y validar las políticas con las cuentas anteriores. La aplicación estática puede publicarse en Vercel para probar la PWA, pero roles, sincronización multiusuario y reportes privados no quedan activos hasta completar esa integración.
+## 2. Crear el dueño inicial
+
+Con el registro público deshabilitado, crea el usuario inicial desde **Authentication → Users → Add user** y confirma su correo. Después ejecuta en SQL Editor, reemplazando el correo:
+
+```sql
+select gen_random_uuid() as business_id;
+```
+
+Copia el UUID generado y asígnalo al perfil del dueño:
+
+```sql
+update public.profiles
+set business_id = 'UUID-DEL-NEGOCIO', role = 'owner'
+where lower(email) = lower('correo-del-dueno@example.com');
+```
+
+Confirma que se actualizó exactamente un perfil. No publiques el UUID del negocio como si fuera una contraseña: el control de permisos lo aplica RLS junto con la sesión autenticada.
+
+## 3. Desplegar la función segura de invitaciones
+
+La clave de servicio solo se configura como secreto de Supabase Edge Functions. Desde una terminal con Supabase CLI:
+
+```text
+supabase login
+supabase link --project-ref TU_PROJECT_REF
+supabase secrets set APP_ORIGIN=https://TU-DOMINIO.vercel.app SUPABASE_SERVICE_ROLE_KEY=TU_SERVICE_ROLE_KEY
+supabase functions deploy manage-users
+```
+
+La función verifica el JWT y el rol en la base de datos. Un dueño puede invitar administradores o colaboradores; un administrador únicamente colaboradores. Los colaboradores registran operaciones. Solo el dueño puede consultar movimientos, tarifas guardadas, balances, gráficas e informes. No alteres ni compartas el secreto de servicio.
+
+## 4. Publicar e importar los datos que ya existen
+
+1. Publica con `vercel --prod` después de configurar `supabase-config.js`.
+2. Inicia sesión en cada PC o teléfono con su propia cuenta. La sincronización en tiempo real requiere la publicación Realtime del paso 1.
+3. Si hay información antigua guardada en el navegador del dueño, abre la aplicación en **ese mismo dispositivo** e inicia sesión como dueño. En **Usuarios**, pulsa **Importar datos de este dispositivo**. Esto mezcla los registros locales existentes con la nube y omite placas que ya estén activas. Revisa el reporte antes de importar datos de otras instalaciones.
+4. Desde **Usuarios**, invita al equipo y asigna sus roles. El correo de invitación debe poder recibirse para activar la cuenta y crear la contraseña.
+
+Los datos locales no se comparten automáticamente; deben importarse desde cada dispositivo que los tenga. Valida las cuentas de dueño, administrador y colaborador antes de operar con información real.

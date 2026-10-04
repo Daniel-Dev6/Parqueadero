@@ -18,6 +18,100 @@ let currentReceipt = null;
 let pendingCheckoutId = null;
 let editingRecord = null;
 let reportFilters = { plate: "", from: "", to: "" };
+let supabaseClient = null;
+let currentProfile = null;
+let persistedState = null;
+let realtimeChannel = null;
+let cloudWriteInProgress = false;
+let cloudRefreshPending = false;
+let activeUserId = null;
+let pendingPasswordSetup = /type=(invite|recovery)/.test(location.hash);
+
+const roleLabels = { owner: "Dueño", admin: "Administrador", collaborator: "Colaborador" };
+
+function isOwner() {
+  return currentProfile?.role === "owner";
+}
+
+function canManageTeam() {
+  return ["owner", "admin"].includes(currentProfile?.role);
+}
+
+function applyRoleVisibility() {
+  const role = currentProfile?.role;
+  document.querySelectorAll("[data-role-visibility]").forEach((element) => {
+    const roles = element.dataset.roleVisibility.split(",");
+    element.hidden = !roles.includes(role);
+  });
+  document.querySelectorAll("[data-financial]").forEach((element) => {
+    element.hidden = !isOwner();
+  });
+  document.querySelectorAll("[data-owner-only]").forEach((element) => {
+    element.hidden = !isOwner();
+  });
+  byId("user-badge").textContent = `${currentProfile?.email || ""} · ${roleLabels[role] || ""}`;
+  byId("user-badge").hidden = false;
+  byId("logout-button").hidden = false;
+  if (!isOwner()) {
+    clearFinancialViews();
+    if (!canManageTeam()) byId("team-table").replaceChildren();
+  }
+}
+
+function clearFinancialViews() {
+  ["stat-today", "stat-month", "report-total", "report-expense-total", "report-net",
+    "report-count", "report-membership-total", "balance-sales", "balance-expenses", "balance-net"]
+    .forEach((id) => { if (byId(id)) byId(id).textContent = "—"; });
+  ["recent-table", "report-table", "cashflow-table", "monthly-chart"]
+    .forEach((id) => { if (byId(id)) byId(id).replaceChildren(); });
+  if (byId("receipt-dialog").open) byId("receipt-dialog").close();
+  ["edit-dialog", "checkout-dialog"].forEach((id) => {
+    if (byId(id).open) byId(id).close();
+  });
+  byId("edit-form").reset();
+  byId("checkout-form").reset();
+  byId("receipt-details").replaceChildren();
+  byId("receipt-total").textContent = "";
+  currentReceipt = null;
+}
+
+function showSignedOut(message = "") {
+  currentProfile = null;
+  activeUserId = null;
+  persistedState = null;
+  if (realtimeChannel) {
+    supabaseClient.removeChannel(realtimeChannel);
+    realtimeChannel = null;
+  }
+  state.active = [];
+  state.transactions = [];
+  state.memberships = [];
+  state.expenses = [];
+  clearFinancialViews();
+  byId("team-table").replaceChildren();
+  byId("app-main").hidden = true;
+  byId("auth-screen").hidden = false;
+  byId("user-badge").hidden = true;
+  byId("logout-button").hidden = true;
+  byId("auth-message").textContent = message;
+  byId("login-form").hidden = false;
+  byId("password-setup-form").hidden = true;
+}
+
+function stateIsEmpty(data) {
+  return data.active.length === 0 && data.transactions.length === 0 &&
+    data.memberships.length === 0 && (data.expenses?.length || 0) === 0;
+}
+
+function appendUniqueRecords(current, imported, key = (record) => record.id) {
+  const known = new Set(current.map(key));
+  return current.concat(imported.filter((record) => {
+    const recordKey = key(record);
+    if (known.has(recordKey)) return false;
+    known.add(recordKey);
+    return true;
+  }));
+}
 
 function showToast(message, isError = false) {
   const toast = byId("toast");
@@ -72,34 +166,343 @@ function isValidStore(data) {
     (data.expenses === undefined || Array.isArray(data.expenses));
 }
 
-function loadData() {
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (!saved) return;
-    const parsed = JSON.parse(saved);
-    if (!isValidStore(parsed)) {
-      showToast("Los datos guardados no tienen un formato válido. Se inició una sesión nueva.", true);
-      return;
-    }
-    state.active = parsed.active;
-    state.transactions = parsed.transactions;
-    state.memberships = parsed.memberships;
-    state.expenses = parsed.expenses || [];
-  } catch (error) {
-    console.error("No se pudieron cargar los datos guardados:", error);
-    showToast("No se pudieron cargar los datos del navegador. Revisa el almacenamiento local.", true);
+function throwIfError(result) {
+  if (result.error) throw result.error;
+  return result.data;
+}
+
+async function selectBusinessRows(table, businessId, columns = "*", orderBy = "id") {
+  const rows = [];
+  const pageSize = 1000;
+  for (let offset = 0; ; offset += pageSize) {
+    const page = throwIfError(await supabaseClient.from(table)
+      .select(columns)
+      .eq("business_id", businessId)
+      .order(orderBy)
+      .range(offset, offset + pageSize - 1));
+    rows.push(...page);
+    if (page.length < pageSize) return rows;
   }
 }
 
-function saveData() {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    return true;
-  } catch (error) {
-    console.error("No se pudieron guardar los datos:", error);
-    showToast("No se pudieron guardar los cambios. Revisa el espacio disponible del navegador.", true);
+function changedRecords(current, previous) {
+  const oldById = new Map(previous.map((record) => [record.id, record]));
+  return current.filter((record) => JSON.stringify(record) !== JSON.stringify(oldById.get(record.id)));
+}
+
+function removedIds(previous, current) {
+  const currentIds = new Set(current.map((record) => record.id));
+  return previous.filter((record) => !currentIds.has(record.id)).map((record) => record.id);
+}
+
+async function cloudPersistState() {
+  const previous = persistedState || { active: [], transactions: [], memberships: [], expenses: [] };
+  const activeChanged = changedRecords(state.active, previous.active);
+  const membershipsChanged = changedRecords(state.memberships, previous.memberships);
+  const transactionsChanged = changedRecords(state.transactions, previous.transactions);
+  const expensesChanged = changedRecords(state.expenses, previous.expenses);
+  const ratesChanged = activeChanged.filter((vehicle) => isOwner() ||
+    !previous.active.some((old) => old.id === vehicle.id));
+  const pricesChanged = membershipsChanged.filter((membership) => isOwner() ||
+    !previous.memberships.some((old) => old.id === membership.id));
+  const payload = {
+    active_upsert: activeChanged.map((vehicle) => ({
+      id: vehicle.id,
+      plate: vehicle.plate,
+      vehicle_type: vehicle.vehicleType,
+      entry_at: vehicle.entryAt,
+      hourly_rate: Number(vehicle.hourlyRate) || 0,
+    })),
+    active_delete: removedIds(previous.active, state.active),
+    memberships_upsert: membershipsChanged.map((membership) => ({
+      id: membership.id,
+      plate: membership.plate,
+      customer_name: membership.customerName,
+      phone: membership.phone || null,
+      starts_at: membership.startsAt,
+      ends_at: membership.endsAt,
+    })),
+    memberships_delete: removedIds(previous.memberships, state.memberships),
+    membership_prices_upsert: pricesChanged.map((membership) => ({
+      membership_id: membership.id,
+      monthly_rate: Number(membership.monthlyRate) || 0,
+    })),
+    transactions_upsert: transactionsChanged.map((transaction) => ({
+      id: transaction.id,
+      receipt_number: transaction.receiptNumber || transaction.id.slice(0, 8).toUpperCase(),
+      category: transaction.category,
+      plate: transaction.plate || null,
+      description: transaction.description || null,
+      customer_name: transaction.customerName || null,
+      phone: transaction.phone || null,
+      amount: Number(transaction.amount) || 0,
+      hourly_rate: Number.isFinite(Number(transaction.hourlyRate)) ? Number(transaction.hourlyRate) : null,
+      charged_hours: Number.isFinite(Number(transaction.chargedHours)) ? Number(transaction.chargedHours) : null,
+      duration_minutes: Number.isFinite(Number(transaction.durationMinutes)) ? Number(transaction.durationMinutes) : null,
+      entry_at: transaction.entryAt || null,
+      exit_at: transaction.exitAt || null,
+      starts_at: transaction.startsAt || null,
+      ends_at: transaction.endsAt || null,
+      paid_at: transaction.paidAt || new Date().toISOString(),
+    })),
+    transactions_delete: removedIds(previous.transactions, state.transactions),
+    expenses_upsert: expensesChanged.map((expense) => ({
+      id: expense.id,
+      description: expense.description,
+      amount: Number(expense.amount) || 0,
+      paid_at: expense.paidAt || new Date().toISOString(),
+    })),
+    expenses_delete: removedIds(previous.expenses, state.expenses),
+    rates_upsert: ratesChanged.map((vehicle) => ({
+      vehicle_id: vehicle.id,
+      hourly_rate: Number(vehicle.hourlyRate) || 0,
+    })),
+  };
+  const result = await supabaseClient.rpc("sync_business_delta", { p_delta: payload });
+  throwIfError(result);
+}
+
+async function saveData() {
+  if (!supabaseClient || !currentProfile) {
+    showToast("Inicia sesión antes de guardar cambios.", true);
     return false;
   }
+  if (cloudWriteInProgress) {
+    showToast("Espera a que termine la sincronización actual.", true);
+    return false;
+  }
+  const submitButtons = [...document.querySelectorAll("#app-main button[type=submit]")];
+  const wasDisabled = submitButtons.map((button) => button.disabled);
+  try {
+    cloudWriteInProgress = true;
+    submitButtons.forEach((button) => { button.disabled = true; });
+    await cloudPersistState();
+    persistedState = snapshotState();
+    return true;
+  } catch (error) {
+    console.error("No se pudieron sincronizar los datos con Supabase:", error);
+    showToast(`No se pudieron sincronizar los cambios: ${error.message || "verifica la conexión y los permisos."}`, true);
+    return false;
+  } finally {
+    cloudWriteInProgress = false;
+    submitButtons.forEach((button, index) => { button.disabled = wasDisabled[index]; });
+    if (cloudRefreshPending) {
+      cloudRefreshPending = false;
+      window.setTimeout(() => loadCloudState().catch(showCloudError), 250);
+    }
+  }
+}
+
+async function loadCloudState() {
+  const businessId = currentProfile.business_id;
+  const activeRows = await selectBusinessRows("active_vehicles", businessId);
+  const membershipRows = await selectBusinessRows("memberships", businessId);
+  let rateByVehicle = new Map();
+  let priceByMembership = new Map();
+  if (isOwner()) {
+    const rates = await selectBusinessRows("active_vehicle_rates", businessId, "vehicle_id,hourly_rate", "vehicle_id");
+    const prices = await selectBusinessRows("membership_prices", businessId, "membership_id,monthly_rate", "membership_id");
+    rateByVehicle = new Map(rates.map((row) => [row.vehicle_id, Number(row.hourly_rate)]));
+    priceByMembership = new Map(prices.map((row) => [row.membership_id, Number(row.monthly_rate)]));
+  }
+  state.active = activeRows.map((row) => ({
+    id: row.id,
+    plate: row.plate,
+    vehicleType: row.vehicle_type,
+    entryAt: row.entry_at,
+    hourlyRate: rateByVehicle.get(row.id) ?? 0,
+    createdBy: row.created_by,
+  }));
+  state.memberships = membershipRows.map((row) => ({
+    id: row.id,
+    plate: row.plate,
+    customerName: row.customer_name,
+    phone: row.phone || "",
+    startsAt: row.starts_at,
+    endsAt: row.ends_at,
+    monthlyRate: priceByMembership.get(row.id) ?? 0,
+    createdBy: row.created_by,
+  }));
+  if (isOwner()) {
+    const transactionRows = await selectBusinessRows("transactions", businessId);
+    const expenseRows = await selectBusinessRows("expenses", businessId);
+    state.transactions = transactionRows.map((row) => ({
+      id: row.id,
+      receiptNumber: row.receipt_number,
+      category: row.category,
+      plate: row.plate || "",
+      description: row.description || "",
+      customerName: row.customer_name || "",
+      phone: row.phone || "",
+      amount: Number(row.amount),
+      hourlyRate: Number(row.hourly_rate) || 0,
+      chargedHours: Number(row.charged_hours) || 0,
+      durationMinutes: Number(row.duration_minutes) || 0,
+      entryAt: row.entry_at,
+      exitAt: row.exit_at,
+      startsAt: row.starts_at,
+      endsAt: row.ends_at,
+      paidAt: row.paid_at,
+      createdBy: row.created_by,
+    }));
+    state.expenses = expenseRows.map((row) => ({
+      id: row.id,
+      description: row.description,
+      amount: Number(row.amount),
+      paidAt: row.paid_at,
+      createdBy: row.created_by,
+    }));
+  } else {
+    state.transactions = [];
+    state.expenses = [];
+  }
+  persistedState = snapshotState();
+  renderAll();
+}
+
+async function loadTeam() {
+  if (!canManageTeam()) return;
+  const profiles = [];
+  const pageSize = 1000;
+  for (let offset = 0; ; offset += pageSize) {
+    const page = throwIfError(await supabaseClient.from("profiles")
+      .select("id,email,role").eq("business_id", currentProfile.business_id)
+      .order("created_at").range(offset, offset + pageSize - 1));
+    profiles.push(...page);
+    if (page.length < pageSize) break;
+  }
+  byId("team-table").innerHTML = profiles.map((profile) => {
+    const allowedRoles = isOwner()
+      ? ["admin", "collaborator"]
+      : ["collaborator"];
+    const canChangeRole = profile.id !== currentProfile.id && profile.role !== "owner" &&
+      (isOwner() || profile.role === "collaborator");
+    return `<tr>
+      <td>${escapeHtml(profile.email || "Invitación pendiente")}</td>
+      <td>
+        ${canChangeRole ? `<select class="team-role-select" data-role-user="${escapeHtml(profile.id)}" aria-label="Rol para ${escapeHtml(profile.email || "usuario")}">
+          ${allowedRoles.map((role) => `<option value="${role}" ${profile.role === role ? "selected" : ""}>${roleLabels[role]}</option>`).join("")}
+          ${profile.role === "owner" ? `<option value="owner" selected>${roleLabels.owner}</option>` : ""}
+        </select>` : escapeHtml(roleLabels[profile.role] || profile.role)}
+      </td>
+      <td>${canChangeRole ? `<button class="button button-secondary button-small" type="button" data-save-role="${escapeHtml(profile.id)}">Guardar rol</button>` : ""}</td>
+    </tr>`;
+  }).join("");
+  byId("team-empty").hidden = profiles.length > 0;
+}
+
+async function activateSession(session) {
+  if (!session) {
+    showSignedOut();
+    return;
+  }
+  if (activeUserId === session.user.id && !byId("app-main").hidden) return;
+  byId("app-main").hidden = true;
+  byId("auth-screen").hidden = false;
+  if (pendingPasswordSetup) {
+    byId("login-form").hidden = true;
+    byId("password-setup-form").hidden = false;
+    byId("auth-message").textContent = "Elige una contraseña nueva para tu cuenta.";
+    return;
+  }
+  byId("auth-message").textContent = "Cargando tus datos compartidos...";
+  const profile = throwIfError(await supabaseClient.from("profiles")
+    .select("id,email,business_id,role").eq("id", session.user.id).single());
+  if (!profile.business_id || !roleLabels[profile.role]) {
+    const message = "Tu usuario todavía no tiene un negocio y un rol asignados. Pide al dueño que complete la configuración.";
+    showSignedOut(message);
+    await supabaseClient.auth.signOut();
+    byId("auth-message").textContent = message;
+    return;
+  }
+  currentProfile = profile;
+  activeUserId = session.user.id;
+  applyRoleVisibility();
+  byId("auth-screen").hidden = true;
+  byId("app-main").hidden = false;
+  await loadCloudState();
+  if (canManageTeam()) await loadTeam();
+  if (realtimeChannel) supabaseClient.removeChannel(realtimeChannel);
+  const tables = ["active_vehicles", "memberships"];
+  if (isOwner()) tables.push("active_vehicle_rates", "membership_prices", "transactions", "expenses");
+  realtimeChannel = supabaseClient.channel(`business-${profile.business_id}`);
+  tables.forEach((table) => {
+    realtimeChannel.on("postgres_changes", {
+      event: "*",
+      schema: "public",
+      table,
+      filter: `business_id=eq.${profile.business_id}`,
+    }, () => {
+      if (cloudWriteInProgress) cloudRefreshPending = true;
+      else window.setTimeout(() => loadCloudState().catch(showCloudError), 250);
+    });
+  });
+  realtimeChannel.on("postgres_changes", {
+    event: "*", schema: "public", table: "profiles",
+    filter: `business_id=eq.${profile.business_id}`,
+  }, async (change) => {
+    if (change.new?.id === currentProfile?.id) {
+      try {
+        const updated = throwIfError(await supabaseClient.from("profiles")
+          .select("id,email,business_id,role").eq("id", currentProfile.id).single());
+        if (!updated.business_id || !roleLabels[updated.role]) {
+          await supabaseClient.auth.signOut();
+          showSignedOut("Tu acceso fue desactivado. Contacta al dueño.");
+          return;
+        }
+        currentProfile = updated;
+        applyRoleVisibility();
+        await loadCloudState();
+      } catch (error) {
+        showCloudError(error);
+      }
+    }
+    if (canManageTeam()) await loadTeam().catch(showCloudError);
+  });
+  realtimeChannel.subscribe();
+}
+
+async function initializeSupabase() {
+  const config = window.PARQUEADERO_CONFIG || {};
+  if (!config.supabaseUrl || !config.supabaseAnonKey) {
+    byId("setup-warning").hidden = false;
+    byId("login-form").querySelector("button[type=submit]").disabled = true;
+    return;
+  }
+  byId("setup-warning").hidden = true;
+  byId("login-form").querySelector("button[type=submit]").disabled = false;
+  if (!window.supabase?.createClient) {
+    byId("auth-message").textContent = "No se pudo cargar el cliente de Supabase. Verifica la conexión a internet.";
+    return;
+  }
+  try {
+    supabaseClient = window.supabase.createClient(config.supabaseUrl, config.supabaseAnonKey);
+    supabaseClient.auth.onAuthStateChange((event, session) => {
+      if (event === "INITIAL_SESSION") return;
+      queueMicrotask(() => activateSession(session).catch((error) => {
+        showSignedOut(`No se pudieron cargar los datos: ${error.message || error}`);
+        showCloudError(error);
+      }));
+    });
+    const { data, error } = await supabaseClient.auth.getSession();
+    if (error) throw error;
+    await activateSession(data.session);
+  } catch (error) {
+    showCloudError(error);
+    byId("auth-message").textContent = `No se pudo iniciar la conexión: ${error.message || error}`;
+  }
+}
+
+function showCloudError(error) {
+  console.error("Error de Supabase:", error);
+  showToast(`Error de sincronización: ${error.message || error}`, true);
+}
+
+async function invokeTeamAction(body) {
+  const result = await supabaseClient.functions.invoke("manage-users", { body });
+  if (result.data?.error) throw new Error(result.data.error);
+  if (result.error) throw result.error;
+  return result.data;
 }
 
 function snapshotState() {
@@ -145,8 +548,8 @@ function renderStats() {
     return total + (sameLocalMonth(date, now) ? Number(transaction.amount) || 0 : 0);
   }, 0);
   byId("stat-active").textContent = state.active.length;
-  byId("stat-today").textContent = formatMoney(todaySales);
-  byId("stat-month").textContent = formatMoney(monthSales);
+  byId("stat-today").textContent = isOwner() ? formatMoney(todaySales) : "—";
+  byId("stat-month").textContent = isOwner() ? formatMoney(monthSales) : "—";
   byId("stat-memberships").textContent = state.memberships.filter(isMembershipActive).length;
   byId("active-count").textContent = state.active.length;
   byId("membership-count").textContent = state.memberships.length;
@@ -161,7 +564,7 @@ function renderActive() {
     <tr>
       <td class="vehicle-cell"><strong class="plate">${escapeHtml(vehicle.plate)}</strong><span>${escapeHtml(vehicle.vehicleType)}</span></td>
       <td>${escapeHtml(formatDateTime(vehicle.entryAt))}</td>
-      <td>${escapeHtml(formatMoney(vehicle.hourlyRate))}</td>
+      <td data-financial ${isOwner() ? "" : "hidden"}>${isOwner() ? escapeHtml(formatMoney(vehicle.hourlyRate)) : ""}</td>
       <td class="action-cell">
         <button class="button button-secondary button-small" type="button" data-edit-active="${escapeHtml(vehicle.id)}">Editar</button>
         <button class="button button-exit" type="button" data-checkout="${escapeHtml(vehicle.id)}">Dar salida</button>
@@ -180,10 +583,15 @@ function transactionDescription(transaction) {
 }
 
 function renderRecent() {
+  if (!isOwner()) {
+    byId("recent-table").replaceChildren();
+    byId("recent-empty").hidden = false;
+    return;
+  }
   const transactions = [...state.transactions]
     .sort((a, b) => (validDate(b.paidAt)?.getTime() || 0) - (validDate(a.paidAt)?.getTime() || 0))
     .slice(0, 8);
-  byId("recent-table").innerHTML = transactions.map((transaction) => `
+  byId("recent-table").innerHTML = (isOwner() ? transactions : []).map((transaction) => `
     <tr>
       <td>${escapeHtml(formatDateTime(transaction.paidAt))}</td>
       <td><strong class="plate">${escapeHtml(transaction.plate || transaction.description || "—")}</strong></td>
@@ -211,7 +619,7 @@ function renderMemberships() {
       <tr>
         <td class="vehicle-cell"><strong>${escapeHtml(membership.customerName)}</strong><span class="plate">${escapeHtml(membership.plate)}</span></td>
         <td>${escapeHtml(formatDate(membership.endsAt))}</td>
-        <td>${escapeHtml(formatMoney(membership.monthlyRate))}</td>
+        <td data-financial ${isOwner() ? "" : "hidden"}>${isOwner() ? escapeHtml(formatMoney(membership.monthlyRate)) : ""}</td>
         <td><span class="status-badge${active ? "" : " expired"}">${active ? "Vigente" : "Vencida"}</span></td>
         <td><button class="button button-exit" type="button" data-renew="${escapeHtml(membership.id)}">Renovar</button></td>
       </tr>
@@ -237,6 +645,11 @@ function getFilteredTransactions() {
 }
 
 function renderReport() {
+  if (!isOwner()) {
+    byId("report-table").innerHTML = "";
+    byId("report-empty").hidden = false;
+    return;
+  }
   const transactions = getFilteredTransactions();
   const expenses = getFilteredExpenses();
   const total = transactions.reduce((sum, transaction) => sum + (Number(transaction.amount) || 0), 0);
@@ -332,6 +745,11 @@ function transactionMonthKey(item) {
 }
 
 function renderCashflow() {
+  if (!isOwner()) {
+    ["balance-sales", "balance-expenses", "balance-net"].forEach((id) => { byId(id).textContent = "—"; });
+    byId("cashflow-table").replaceChildren();
+    return;
+  }
   const now = new Date();
   const todayTransactions = state.transactions.filter((item) => sameLocalDay(transactionDate(item), now));
   const todayExpenses = state.expenses.filter((item) => sameLocalDay(validDate(item.paidAt), now));
@@ -434,7 +852,7 @@ function closeVehicle(vehicleId) {
   byId("checkout-dialog").showModal();
 }
 
-function completeCheckout(amount) {
+async function completeCheckout(amount) {
   const index = state.active.findIndex((vehicle) => vehicle.id === pendingCheckoutId);
   if (index < 0) {
     showToast("No se encontró el vehículo activo para cerrar.", true);
@@ -470,7 +888,7 @@ function completeCheckout(amount) {
   const previousState = snapshotState();
   state.active.splice(index, 1);
   state.transactions.push(transaction);
-  if (!saveData()) {
+  if (!await saveData()) {
     restoreState(previousState);
     renderAll();
     return;
@@ -481,7 +899,7 @@ function completeCheckout(amount) {
   openReceipt(transaction);
 }
 
-function recordCashMovement(form, kind) {
+async function recordCashMovement(form, kind) {
   const values = new FormData(form);
   const description = String(values.get("description") || "").trim();
   const amount = Number(values.get("amount"));
@@ -503,7 +921,7 @@ function recordCashMovement(form, kind) {
       amount,
     });
   }
-  if (!saveData()) {
+  if (!await saveData()) {
     restoreState(previousState);
     renderAll();
     return;
@@ -535,15 +953,19 @@ function editRecord(type, id) {
         ? record.description
         : record.plate;
   amountInput.value = String(type === "active" ? record.hourlyRate : record.amount);
+  byId("edit-amount-field").hidden = type === "active" && !isOwner();
+  amountInput.required = !(type === "active" && !isOwner());
   byId("edit-dialog").showModal();
 }
 
-function saveEditedRecord(form) {
+async function saveEditedRecord(form) {
   if (!editingRecord) return;
   const { type, id } = editingRecord;
   const label = String(new FormData(form).get("label") || "").trim();
-  const amount = Number(new FormData(form).get("amount"));
-  if (!label || !Number.isFinite(amount) || amount < 0) {
+  const amount = type === "active" && !isOwner()
+    ? null
+    : Number(new FormData(form).get("amount"));
+  if (!label || (amount !== null && (!Number.isFinite(amount) || amount < 0))) {
     showToast("Completa el texto y un valor válido igual o mayor a cero.", true);
     return;
   }
@@ -563,7 +985,7 @@ function saveEditedRecord(form) {
   const previousState = snapshotState();
   if (type === "active") {
     record.plate = normalizePlate(label);
-    record.hourlyRate = amount;
+    record.hourlyRate = isOwner() ? amount : record.hourlyRate;
   } else if (type === "expense") {
     record.description = label;
     record.amount = amount;
@@ -572,7 +994,7 @@ function saveEditedRecord(form) {
     else record.plate = normalizePlate(label);
     record.amount = amount;
   }
-  if (!saveData()) {
+  if (!await saveData()) {
     restoreState(previousState);
     renderAll();
     return;
@@ -583,7 +1005,7 @@ function saveEditedRecord(form) {
   showToast("Registro actualizado.");
 }
 
-function createMembership(form) {
+async function createMembership(form) {
   const values = new FormData(form);
   const plate = normalizePlate(values.get("plate"));
   const customerName = String(values.get("customerName") || "").trim();
@@ -626,7 +1048,7 @@ function createMembership(form) {
   const previousState = snapshotState();
   state.memberships.push(membership);
   state.transactions.push(transaction);
-  if (!saveData()) {
+  if (!await saveData()) {
     restoreState(previousState);
     renderAll();
     return;
@@ -638,7 +1060,7 @@ function createMembership(form) {
   openReceipt(transaction);
 }
 
-function renewMembership(membershipId) {
+async function renewMembership(membershipId) {
   const membership = state.memberships.find((item) => item.id === membershipId);
   if (!membership) {
     showToast("No se encontró la mensualidad para renovar.", true);
@@ -652,6 +1074,15 @@ function renewMembership(membershipId) {
   const previousState = snapshotState();
   membership.startsAt = startsAt;
   membership.endsAt = localDateTimeValue(ends).slice(0, 10);
+  const rateInput = isOwner()
+    ? String(membership.monthlyRate)
+    : window.prompt("Ingresa el valor autorizado para renovar esta mensualidad:", "");
+  if (rateInput === null) return;
+  const enteredRate = Number(rateInput);
+  if (!Number.isFinite(enteredRate) || enteredRate < 0) {
+    showToast("La renovación requiere un valor válido igual o mayor a cero.", true);
+    return;
+  }
   const transaction = {
     id: crypto.randomUUID(),
     receiptNumber: `MEN-${Date.now().toString().slice(-8)}`,
@@ -663,10 +1094,10 @@ function renewMembership(membershipId) {
     startsAt: membership.startsAt,
     endsAt: membership.endsAt,
     paidAt: new Date().toISOString(),
-    amount: Number(membership.monthlyRate),
+    amount: enteredRate,
   };
   state.transactions.push(transaction);
-  if (!saveData()) {
+  if (!await saveData()) {
     restoreState(previousState);
     renderAll();
     return;
@@ -702,6 +1133,14 @@ function sendReceiptToWhatsApp() {
 }
 
 function setView(viewId) {
+  if (viewId === "reports-view" && !isOwner()) {
+    showToast("Solo el dueño puede consultar los reportes.", true);
+    return;
+  }
+  if (viewId === "team-view" && !canManageTeam()) {
+    showToast("No tienes permiso para administrar usuarios.", true);
+    return;
+  }
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.classList.toggle("active", tab.dataset.view === viewId);
   });
@@ -711,6 +1150,7 @@ function setView(viewId) {
     view.classList.toggle("active", active);
   });
   if (viewId === "reports-view") renderReport();
+  if (viewId === "team-view") loadTeam().catch(showCloudError);
 }
 
 byId("current-date").textContent = new Intl.DateTimeFormat("es-CO", {
@@ -718,14 +1158,158 @@ byId("current-date").textContent = new Intl.DateTimeFormat("es-CO", {
 }).format(new Date());
 byId("entry-time").value = localDateTimeValue();
 byId("membership-form").elements.startsAt.value = localDateTimeValue().slice(0, 10);
-loadData();
-renderAll();
+showSignedOut();
+
+byId("login-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!supabaseClient) return;
+  const values = new FormData(event.currentTarget);
+  byId("auth-message").textContent = "Validando acceso...";
+  try {
+    const { error } = await supabaseClient.auth.signInWithPassword({
+      email: String(values.get("email") || "").trim(),
+      password: String(values.get("password") || ""),
+    });
+    if (error) throw error;
+  } catch (error) {
+    byId("auth-message").textContent = "No se pudo ingresar. Verifica la conexión, el correo y la contraseña.";
+    console.error("No se pudo iniciar sesión:", error);
+  }
+});
+
+byId("password-setup-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const values = new FormData(event.currentTarget);
+  const password = String(values.get("password") || "");
+  if (password !== String(values.get("confirmPassword") || "")) {
+    byId("auth-message").textContent = "Las contraseñas no coinciden.";
+    return;
+  }
+  const { error } = await supabaseClient.auth.updateUser({ password });
+  if (error) {
+    byId("auth-message").textContent = `No se pudo guardar la contraseña: ${error.message}`;
+    return;
+  }
+  history.replaceState(null, "", location.pathname + location.search);
+  pendingPasswordSetup = false;
+  await supabaseClient.auth.signOut();
+  byId("password-setup-form").hidden = true;
+  byId("login-form").hidden = false;
+  byId("auth-message").textContent = "Contraseña guardada. Ya puedes iniciar sesión.";
+});
+
+byId("reset-password").addEventListener("click", async () => {
+  if (!supabaseClient) return;
+  const email = String(byId("login-form").elements.email.value || "").trim();
+  if (!email) {
+    byId("auth-message").textContent = "Escribe tu correo y vuelve a seleccionar “Olvidé mi contraseña”.";
+    byId("login-form").elements.email.focus();
+    return;
+  }
+  try {
+    const { error } = await supabaseClient.auth.resetPasswordForEmail(email, {
+      redirectTo: `${location.origin}${location.pathname}`,
+    });
+    if (error) throw error;
+    byId("auth-message").textContent = "Si el correo está registrado, recibirás un enlace para cambiar la contraseña.";
+  } catch (error) {
+    byId("auth-message").textContent = `No se pudo enviar el correo: ${error.message || error}`;
+  }
+});
+
+byId("logout-button").addEventListener("click", async () => {
+  const { error } = await supabaseClient.auth.signOut();
+  if (error) showCloudError(error);
+  else showSignedOut("Sesión cerrada.");
+});
+
+byId("invite-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const values = new FormData(event.currentTarget);
+  try {
+    await invokeTeamAction({
+      action: "invite",
+      email: String(values.get("email") || "").trim(),
+      role: String(values.get("role") || ""),
+    });
+    event.currentTarget.reset();
+    byId("auth-message").textContent = "Invitación enviada.";
+    showToast("Invitación enviada por correo.");
+    await loadTeam();
+  } catch (error) {
+    showCloudError(error);
+  }
+});
+
+byId("team-table").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-save-role]");
+  if (!button) return;
+  const userId = button.dataset.saveRole;
+  const role = byId("team-table").querySelector(`[data-role-user="${CSS.escape(userId)}"]`).value;
+  try {
+    await invokeTeamAction({ action: "set-role", userId, role });
+    showToast("Rol actualizado.");
+    await loadTeam();
+  } catch (error) {
+    showCloudError(error);
+  }
+});
+
+byId("migrate-local-data").addEventListener("click", async () => {
+  if (!isOwner()) return;
+  const saved = localStorage.getItem(STORAGE_KEY);
+  if (!saved) {
+    showToast("No se encontraron datos locales guardados en este dispositivo.", true);
+    return;
+  }
+  let imported;
+  try {
+    imported = JSON.parse(saved);
+  } catch (error) {
+    console.error("No se pudieron leer los datos locales para migrarlos:", error);
+    showToast("Los datos locales no tienen un formato JSON válido.", true);
+    return;
+  }
+  if (!isValidStore(imported)) {
+    showToast("Los datos locales tienen un formato incompatible; no se modificó el sistema.", true);
+    return;
+  }
+  const importedCount = imported.active.length + imported.memberships.length +
+    imported.transactions.length + (imported.expenses?.length || 0);
+  if (!window.confirm(`Se intentarán importar ${importedCount} registros de este navegador a la nube. Esta acción no se puede deshacer. ¿Continuar?`)) return;
+  const duplicatePlates = new Set(state.active.map((vehicle) => normalizePlate(vehicle.plate)));
+  const activeToImport = imported.active.filter((vehicle) => {
+    const plate = normalizePlate(vehicle.plate);
+    if (duplicatePlates.has(plate)) return false;
+    duplicatePlates.add(plate);
+    return true;
+  });
+  const previous = snapshotState();
+  state.active = appendUniqueRecords(state.active, activeToImport);
+  state.memberships = appendUniqueRecords(state.memberships, imported.memberships);
+  state.transactions = appendUniqueRecords(state.transactions, imported.transactions);
+  state.expenses = appendUniqueRecords(state.expenses, imported.expenses || []);
+  if (stateIsEmpty(imported)) {
+    showToast("Este dispositivo no tiene registros para importar.", true);
+    restoreState(previous);
+    return;
+  }
+  if (!await saveData()) {
+    restoreState(previous);
+    renderAll();
+    return;
+  }
+  localStorage.removeItem(STORAGE_KEY);
+  renderAll();
+  const skipped = imported.active.length - activeToImport.length;
+  showToast(`Datos importados y sincronizados.${skipped ? ` Se omitieron ${skipped} placas ya activas.` : ""}`);
+});
 
 document.querySelectorAll(".tab").forEach((tab) => {
   tab.addEventListener("click", () => setView(tab.dataset.view));
 });
 
-byId("entry-form").addEventListener("submit", (event) => {
+byId("entry-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
   const values = new FormData(form);
@@ -756,7 +1340,7 @@ byId("entry-form").addEventListener("submit", (event) => {
     entryAt: entryAt.toISOString(),
     hourlyRate,
   });
-  if (!saveData()) {
+  if (!await saveData()) {
     restoreState(previousState);
     renderAll();
     return;
@@ -800,33 +1384,33 @@ byId("recent-table").addEventListener("click", (event) => {
 
 byId("active-search").addEventListener("input", renderActive);
 byId("membership-search").addEventListener("input", renderMemberships);
-byId("membership-form").addEventListener("submit", (event) => {
+byId("membership-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  createMembership(event.currentTarget);
+  await createMembership(event.currentTarget);
 });
 byId("membership-table").addEventListener("click", (event) => {
   const button = event.target.closest("[data-renew]");
-  if (button) renewMembership(button.dataset.renew);
+  if (button) renewMembership(button.dataset.renew).catch(showCloudError);
 });
 byId("sale-form").addEventListener("submit", (event) => {
   event.preventDefault();
-  recordCashMovement(event.currentTarget, "sale");
+  recordCashMovement(event.currentTarget, "sale").catch(showCloudError);
 });
 byId("expense-form").addEventListener("submit", (event) => {
   event.preventDefault();
-  recordCashMovement(event.currentTarget, "expense");
+  recordCashMovement(event.currentTarget, "expense").catch(showCloudError);
 });
-byId("checkout-form").addEventListener("submit", (event) => {
+byId("checkout-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  completeCheckout(Number(byId("checkout-amount").value));
+  await completeCheckout(Number(byId("checkout-amount").value));
 });
 byId("cancel-checkout").addEventListener("click", () => {
   pendingCheckoutId = null;
   byId("checkout-dialog").close();
 });
-byId("edit-form").addEventListener("submit", (event) => {
+byId("edit-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  saveEditedRecord(event.currentTarget);
+  await saveEditedRecord(event.currentTarget);
 });
 byId("cancel-edit").addEventListener("click", () => {
   editingRecord = null;
@@ -893,4 +1477,8 @@ byId("print-receipt").addEventListener("click", () => {
 byId("close-receipt").addEventListener("click", () => byId("receipt-dialog").close());
 byId("receipt-dialog").addEventListener("click", (event) => {
   if (event.target === byId("receipt-dialog")) byId("receipt-dialog").close();
+});
+initializeSupabase().catch((error) => {
+  showCloudError(error);
+  byId("auth-message").textContent = `No se pudo iniciar la conexión: ${error.message || error}`;
 });

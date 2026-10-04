@@ -1,11 +1,12 @@
 "use strict";
 
-const CACHE_NAME = "parqueadero-shell-v1";
+const CACHE_NAME = "parqueadero-shell-v2";
 const APP_FILES = [
   "./",
   "./index.html",
   "./style.css",
   "./script.js",
+  "./supabase-config.js",
   "./manifest.json",
   "./icon.svg",
   "./icon-192.png",
@@ -29,6 +30,22 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET" || new URL(event.request.url).origin !== self.location.origin) return;
+  if (new URL(event.request.url).pathname.endsWith("/supabase-config.js")) {
+    event.respondWith(
+      fetch(event.request).then((response) => {
+        if (response.ok) {
+          const copy = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+        }
+        return response;
+      }).catch(async () => {
+        const cached = await caches.match(event.request);
+        if (cached) return cached;
+        throw new Error("La configuración no está disponible.");
+      })
+    );
+    return;
+  }
   event.respondWith(
     caches.match(event.request).then((cached) => cached || fetch(event.request).then((response) => {
       if (response.ok) {
