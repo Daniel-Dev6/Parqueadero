@@ -1071,9 +1071,7 @@ async function renewMembership(membershipId) {
   const start = currentEnd && currentEnd >= today ? currentEnd : today;
   const startsAt = localDateTimeValue(start).slice(0, 10);
   const ends = addOneMonth(startsAt);
-  const previousState = snapshotState();
-  membership.startsAt = startsAt;
-  membership.endsAt = localDateTimeValue(ends).slice(0, 10);
+  const endsAt = localDateTimeValue(ends).slice(0, 10);
   const rateInput = isOwner()
     ? String(membership.monthlyRate)
     : window.prompt("Ingresa el valor autorizado para renovar esta mensualidad:", "");
@@ -1091,11 +1089,14 @@ async function renewMembership(membershipId) {
     customerName: membership.customerName,
     phone: membership.phone,
     description: "Renovación de mensualidad",
-    startsAt: membership.startsAt,
-    endsAt: membership.endsAt,
+    startsAt,
+    endsAt,
     paidAt: new Date().toISOString(),
     amount: enteredRate,
   };
+  const previousState = snapshotState();
+  membership.startsAt = startsAt;
+  membership.endsAt = endsAt;
   state.transactions.push(transaction);
   if (!await saveData()) {
     restoreState(previousState);
