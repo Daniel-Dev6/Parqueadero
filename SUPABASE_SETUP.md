@@ -5,7 +5,7 @@ La aplicación usa Supabase Auth y Postgres. Los registros se comparten entre lo
 ## 1. Crear y configurar Supabase
 
 1. Crea un proyecto en Supabase.
-2. En **SQL Editor**, ejecuta completo `supabase/schema.sql`.
+2. En **SQL Editor**, ejecuta completo `supabase/schema.sql`. Si el proyecto Supabase ya existe, vuelve a ejecutarlo para aplicar las columnas faltantes de tarifas; la actualización agrega `hourly_rate` y `monthly_rate` con valor inicial cero sin borrar los registros existentes.
 3. En **Authentication → Providers → Email**, desactiva el registro público de usuarios. Los usuarios se crean desde la sección **Usuarios** de la aplicación, mediante invitación.
 4. En **Authentication → URL Configuration**, configura como `Site URL` el dominio final de Vercel y añade ese dominio a `Redirect URLs`. Añade también la URL local de desarrollo si la vas a usar.
 5. En **Database → Publications → supabase_realtime**, habilita estas tablas: `active_vehicles`, `memberships`, `active_vehicle_rates`, `membership_prices`, `transactions`, `expenses` y `profiles`. RLS sigue aplicándose a las suscripciones.
@@ -55,8 +55,8 @@ La función verifica el JWT y el rol en la base de datos. Un dueño puede invita
 
 ## 4. Publicar e importar los datos que ya existen
 
-1. Publica con `vercel --prod` después de configurar `supabase-config.js`.
-2. Inicia sesión en cada PC o teléfono con su propia cuenta. La sincronización en tiempo real requiere la publicación Realtime del paso 1.
+1. Publica la rama `main` en Vercel. El enlace de producción se puede abrir desde celulares y PC; cada persona debe iniciar sesión con la cuenta que le invite el dueño o administrador para compartir los datos del negocio.
+2. Inicia sesión en cada dispositivo con una cuenta del mismo negocio. La sincronización en tiempo real requiere la publicación Realtime del paso 1.
 3. Si hay información antigua guardada en el navegador del dueño, abre la aplicación en **ese mismo dispositivo** e inicia sesión como dueño. En **Usuarios**, pulsa **Importar datos de este dispositivo**. Esto mezcla los registros locales existentes con la nube y omite placas que ya estén activas. Revisa el reporte antes de importar datos de otras instalaciones.
 4. Desde **Usuarios**, invita al equipo y asigna sus roles. El correo de invitación debe poder recibirse para activar la cuenta y crear la contraseña.
 

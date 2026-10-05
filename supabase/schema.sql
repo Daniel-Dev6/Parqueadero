@@ -83,6 +83,10 @@ create table if not exists public.active_vehicle_rates (
   hourly_rate numeric(12, 2) not null check (hourly_rate >= 0)
 );
 
+alter table public.active_vehicle_rates
+  add column if not exists hourly_rate numeric(12, 2) not null default 0
+  check (hourly_rate >= 0);
+
 /* Existing installation may already have these rate tables. */
 create table if not exists public.memberships (
   id uuid primary key default gen_random_uuid(),
@@ -108,6 +112,10 @@ create table if not exists public.membership_prices (
   monthly_rate numeric(12, 2) not null check (monthly_rate >= 0),
   updated_at timestamptz not null default now()
 );
+
+alter table public.membership_prices
+  add column if not exists monthly_rate numeric(12, 2) not null default 0
+  check (monthly_rate >= 0);
 
 create table if not exists public.transactions (
   id uuid primary key default gen_random_uuid(),
