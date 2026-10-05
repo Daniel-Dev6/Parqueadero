@@ -10,8 +10,6 @@
   <link rel="apple-touch-icon" href="apple-touch-icon.png">
   <title>Parqueadero La 49 | Jaime</title>
   <link rel="stylesheet" href="style.css">
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <script src="supabase-config.js"></script>
   <script src="script.js" defer></script>
 </head>
 <body>
@@ -22,42 +20,12 @@
     </a>
     <div class="topbar-actions">
       <button class="button button-install" id="install-app" type="button" hidden>Instalar App</button>
-      <span id="user-badge" class="user-badge" hidden></span>
-      <button class="button button-secondary" id="logout-button" type="button" hidden>Cerrar sesión</button>
+      <span class="user-badge">Guardado en este dispositivo</span>
       <div class="topbar-date" id="current-date"></div>
     </div>
   </header>
 
-  <section class="auth-screen" id="auth-screen">
-    <article class="panel auth-panel">
-      <p class="eyebrow">ACCESO SEGURO</p>
-      <h1>Iniciar sesión</h1>
-      <p class="muted">Ingresa con la cuenta que te invitó el dueño o el administrador.</p>
-      <form id="login-form" class="form-grid">
-        <label class="field field-wide">Correo electrónico
-          <input name="email" type="email" autocomplete="username" required>
-        </label>
-        <label class="field field-wide">Contraseña
-          <input name="password" type="password" autocomplete="current-password" minlength="8" required>
-        </label>
-        <button class="button button-primary field-wide" type="submit">Ingresar</button>
-      </form>
-      <form id="password-setup-form" class="form-grid" hidden>
-        <label class="field field-wide">Nueva contraseña
-          <input name="password" type="password" autocomplete="new-password" minlength="8" required>
-        </label>
-        <label class="field field-wide">Confirmar contraseña
-          <input name="confirmPassword" type="password" autocomplete="new-password" minlength="8" required>
-        </label>
-        <button class="button button-primary field-wide" type="submit">Guardar contraseña</button>
-      </form>
-      <button class="text-button" id="reset-password" type="button">Olvidé mi contraseña</button>
-      <p class="form-hint" id="auth-message" role="status"></p>
-      <p class="setup-warning" id="setup-warning" hidden>Falta configurar la URL y la clave pública de Supabase en <code>supabase-config.js</code>. Revisa SUPABASE_SETUP.md.</p>
-    </article>
-  </section>
-
-  <main class="container" id="app-main" hidden>
+  <main class="container" id="app-main">
     <section class="welcome">
       <div>
         <p class="eyebrow">PANEL DE CONTROL</p>
@@ -94,8 +62,7 @@
       <button class="tab active" type="button" data-view="parking-view">Parqueadero</button>
       <button class="tab" type="button" data-view="memberships-view">Mensualidades</button>
       <button class="tab" type="button" data-view="sales-view">Ventas y salidas</button>
-      <button class="tab" type="button" data-view="team-view" data-role-visibility="owner,admin" hidden>Usuarios</button>
-      <button class="tab" type="button" data-view="reports-view" data-role-visibility="owner" hidden>Reportes</button>
+      <button class="tab" type="button" data-view="reports-view">Reportes</button>
     </nav>
 
     <section class="view active" id="parking-view">
@@ -281,38 +248,7 @@
       </article>
     </section>
 
-    <section class="view" id="team-view" hidden>
-      <div class="content-grid">
-        <article class="panel">
-          <div class="panel-heading"><div><p class="eyebrow">INVITAR PERSONAL</p><h2>Crear usuario</h2></div></div>
-          <form id="invite-form" class="form-grid">
-            <label class="field field-wide">Correo electrónico
-              <input name="email" type="email" autocomplete="off" required>
-            </label>
-            <label class="field field-wide">Rol
-              <select name="role" required>
-                <option value="collaborator">Colaborador</option>
-                <option value="admin" data-owner-only>Administrador</option>
-              </select>
-            </label>
-            <button class="button button-primary field-wide" type="submit">Enviar invitación</button>
-          </form>
-          <p class="form-hint">El invitado recibirá un correo para activar su cuenta. El administrador solo puede crear colaboradores.</p>
-        </article>
-        <article class="panel">
-          <div class="panel-heading"><div><p class="eyebrow">EQUIPO</p><h2>Usuarios y roles</h2></div></div>
-          <p class="form-hint" data-owner-only>El dueño puede importar los datos locales de este dispositivo una sola vez después de iniciar sesión.</p>
-          <button class="button button-secondary button-small" id="migrate-local-data" data-owner-only type="button">Importar datos de este dispositivo</button>
-          <div class="table-wrap"><table>
-            <thead><tr><th>Correo</th><th>Rol</th><th>Acción</th></tr></thead>
-            <tbody id="team-table"></tbody>
-          </table></div>
-          <p class="empty-state" id="team-empty">No hay usuarios para mostrar.</p>
-        </article>
-      </div>
-    </section>
-
-    <section class="view" id="reports-view" data-role-visibility="owner" hidden>
+    <section class="view" id="reports-view" hidden>
       <article class="panel">
         <div class="panel-heading">
           <div>
@@ -359,7 +295,7 @@
     </section>
   </main>
 
-  <footer class="footer">Parqueadero · Gestión local de vehículos y ventas<br>Elaborado por Daniel Fernando Avendaño Patiño <br> Cel 3126717702</footer>
+  <footer class="footer">Parqueadero · Los datos se guardan solo en este dispositivo<br>Elaborado por Daniel Fernando Avendaño Patiño <br> Cel 3126717702</footer>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
   <dialog id="receipt-dialog" class="receipt-dialog">
